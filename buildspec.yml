@@ -1,0 +1,16 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+  pre_build:
+    commands:
+      - node --version
+      - npm run check
+  build:
+    commands:
+      - npm test
+      - aws cloudformation validate-template --template-body file://infrastructure/template.yaml
+artifacts:
+  files:
+    - docs/INFORME.md

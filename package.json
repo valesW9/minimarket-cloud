@@ -1,0 +1,7 @@
+{
+  "name": "minimarket-cloud", "version": "1.0.0", "private": true,
+  "description": "Gestion de pedidos e inventario con IaC para AWS Academy",
+  "scripts": {"start":"node src/server.js", "test":"node --test tests/*.test.js", "check":"node --check src/server.js && node --check src/store.js"},
+  "dependencies": {"mysql2":"^3.12.0"},
+  "engines":{"node":">=20"}
+}

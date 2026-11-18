@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimarket Cloud - VPC EC2 RDS CloudWatch y controles basicos IaC (AWS Academy)
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Par de claves EXISTENTE para acceso de emergencia (no subir .pem)
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: Perfil de instancia preexistente con acceso a S3 y SSM (confirmar en laboratorio)
+  ArtifactBucket:
+    Type: String
+    Description: Bucket S3 PREEXISTENTE con el ZIP del proyecto
+  ArtifactKey:
+    Type: String
+    Default: minimarket-cloud.zip
+  DBPasswordParameter:
+    Type: String
+    Default: /minimarket/db-password
+    Description: Nombre de un parametro SSM SecureString preexistente, version 1
+  AdminTokenParameter:
+    Type: String
+    Default: /minimarket/admin-token
+    Description: Nombre de parametro SSM SecureString preexistente, version 1
+  SSHCidr:
+    Type: String
+    Default: 127.0.0.1/32
+    Description: SSH cerrado por defecto (restringir a tu IP /32 solo si es necesario)
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t4g.micro]
+  EnableSNS:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true','false']
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Direccion para confirmar suscripcion SNS (solo si se habilita)
+Conditions:
+  HasSNS: !Equals [!Ref EnableSNS, 'true']
+Resources:
+  Network:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{Key: Name, Value: minimarket-vpc}]
+  Gateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: {VpcId: !Ref Network, InternetGatewayId: !Ref Gateway}
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.42.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.42.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Network
+      CidrBlock: 10.42.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+  RouteTablePublic:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref Network}
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Gateway
+  AssociationPublic:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnet, RouteTableId: !Ref RouteTablePublic}
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Solo HTTP de demostracion; habilitar HTTPS con ALB ACM para produccion
+      VpcId: !Ref Network
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+        - {IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref SSHCidr}
+      SecurityGroupEgress:
+        - {IpProtocol: '-1', CidrIp: 0.0.0.0/0}
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MySQL solo desde instancias de aplicacion
+      VpcId: !Ref Network
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref WebSecurityGroup}
+  SubnetGroupDB:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Dos subredes privadas en diferentes AZ
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: mysql
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      StorageEncrypted: true
+      BackupRetentionPeriod: 1
+      MultiAZ: false
+      PubliclyAccessible: false
+      DBName: minimarket
+      MasterUsername: minimarket
+      MasterUserPassword: !Sub '{{resolve:ssm-secure:${DBPasswordParameter}:1}}'
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      DBSubnetGroupName: !Ref SubnetGroupDB
+      DeletionProtection: false
+      Tags: [{Key: Project, Value: minimarket-cloud}]
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/minimarket/${AWS::StackName}/app'
+      RetentionInDays: 7
+  Server:
+    Type: AWS::EC2::Instance
+    DependsOn: [Database, ApplicationLogGroup]
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref InstanceProfileName
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref WebSecurityGroup]
+      MetadataOptions: {HttpTokens: required, HttpEndpoint: enabled}
+      Tags: [{Key: Name, Value: minimarket-server}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee -a /var/log/minimarket-bootstrap.log) 2>&1
+          dnf install -y nodejs npm mariadb105 amazon-cloudwatch-agent awscli unzip nginx
+          mkdir -p /opt/minimarket /var/log/minimarket
+          aws s3 cp 's3://${ArtifactBucket}/${ArtifactKey}' /tmp/minimarket-cloud.zip --region '${AWS::Region}'
+          unzip -oq /tmp/minimarket-cloud.zip -d /opt/minimarket
+          cd /opt/minimarket
+          npm install --omit=dev --no-audit --no-fund
+          DB_SECRET=$(aws ssm get-parameter --name '${DBPasswordParameter}' --with-decryption --query Parameter.Value --output text --region '${AWS::Region}')
+          ADMIN_SECRET=$(aws ssm get-parameter --name '${AdminTokenParameter}' --with-decryption --query Parameter.Value --output text --region '${AWS::Region}')
+          umask 077
+          cat > /etc/minimarket.env <<EOC
+          PORT=3000
+          DB_HOST=${Database.Endpoint.Address}
+          DB_USER=minimarket
+          DB_NAME=minimarket
+          DB_SSL=true
+          DB_PASSWORD=$DB_SECRET
+          ADMIN_TOKEN=$ADMIN_SECRET
+          EOC
+          chmod 600 /etc/minimarket.env
+          unset DB_SECRET ADMIN_SECRET
+          cat > /etc/systemd/system/minimarket.service <<'EOC'
+          [Unit]
+          Description=Minimarket Cloud
+          After=network-online.target
+          Wants=network-online.target
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=/opt/minimarket
+          EnvironmentFile=/etc/minimarket.env
+          ExecStart=/usr/bin/node src/server.js
+          Restart=always
+          RestartSec=5
+          StandardOutput=append:/var/log/minimarket/app.log
+          StandardError=append:/var/log/minimarket/app.log
+          [Install]
+          WantedBy=multi-user.target
+          EOC
+          # Usar archivo de opciones MySQL temporal para no mostrar password en argv.
+          ( . /etc/minimarket.env; printf '[client]\nhost=%s\nuser=%s\npassword=%s\nssl\n' "$DB_HOST" "$DB_USER" "$DB_PASSWORD" > /root/.minimarket-my.cnf )
+          chmod 600 /root/.minimarket-my.cnf
+          mariadb --defaults-extra-file=/root/.minimarket-my.cnf < /opt/minimarket/database/schema.sql
+          rm -f /root/.minimarket-my.cnf
+          cat > /etc/nginx/conf.d/minimarket.conf <<'EOC'
+          server {
+            listen 80;
+            server_name _;
+            location / {
+              proxy_pass http://127.0.0.1:3000;
+              proxy_http_version 1.1;
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              client_max_body_size 64k;
+            }
+          }
+          EOC
+          systemctl daemon-reload
+          systemctl enable --now minimarket nginx
+          cat > /opt/minimarket/cloudwatch-agent-runtime.json <<'EOC'
+          {"agent":{"metrics_collection_interval":60},"logs":{"logs_collected":{"files":{"collect_list":[{"file_path":"/var/log/minimarket/app.log","log_group_name":"${ApplicationLogGroup}","log_stream_name":"{instance_id}"}]}}},"metrics":{"append_dimensions":{"InstanceId":"${!aws:InstanceId}"},"metrics_collected":{"mem":{"measurement":["mem_used_percent"]}}}}
+          EOC
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/minimarket/cloudwatch-agent-runtime.json || true
+  CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPU > 80 por ciento durante 10 minutos
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions: [{Name: InstanceId, Value: !Ref Server}]
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasSNS, [!Ref NotificationTopic], !Ref 'AWS::NoValue']
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasSNS
+    Properties: {TopicName: !Sub '${AWS::StackName}-alarmas'}
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasSNS
+    Properties: {Protocol: email, Endpoint: !Ref NotificationEmail, TopicArn: !Ref NotificationTopic}
+Outputs:
+  WebURL:
+    Description: HTTP demostracion (no ingresar datos personales reales)
+    Value: !Sub 'http://${Server.PublicDnsName}'
+  DBEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  EC2InstanceId:
+    Value: !Ref Server
+  LogGroup:
+    Value: !Ref ApplicationLogGroup

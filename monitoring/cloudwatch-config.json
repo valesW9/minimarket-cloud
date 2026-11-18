@@ -1,0 +1,7 @@
+{
+  "agent": {"metrics_collection_interval": 60},
+  "logs": {"logs_collected": {"files": {"collect_list": [
+    {"file_path": "/var/log/minimarket/app.log", "log_group_name": "/minimarket/REEMPLAZAR_NOMBRE_STACK/app", "log_stream_name": "{instance_id}"}
+  ]}}},
+  "metrics": {"metrics_collected": {"mem": {"measurement": ["mem_used_percent"]}}}
+}
