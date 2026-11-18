@@ -147,7 +147,9 @@ Resources:
           #!/bin/bash
           set -euo pipefail
           exec > >(tee -a /var/log/minimarket-bootstrap.log) 2>&1
-          dnf install -y nodejs npm mariadb105 amazon-cloudwatch-agent awscli unzip nginx
+          dnf install -y nodejs22 nodejs22-npm mariadb105 amazon-cloudwatch-agent awscli unzip nginx
+          node --version
+          npm --version
           mkdir -p /opt/minimarket /var/log/minimarket
           aws s3 cp 's3://${ArtifactBucket}/${ArtifactKey}' /tmp/minimarket-cloud.zip --region '${AWS::Region}'
           unzip -oq /tmp/minimarket-cloud.zip -d /opt/minimarket
