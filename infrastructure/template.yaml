@@ -197,13 +197,13 @@ Resources:
           EOC
           # Importar esquema MySQL sin ejecutar el archivo de secretos como Bash
           MYSQL_PWD="$DB_SECRET" mariadb \
-        --host='${Database.Endpoint.Address}' \
-        --user=minimarket \
-        --database=minimarket \
-        --ssl \
-        < /opt/minimarket/database/schema.sql
+            --host='${Database.Endpoint.Address}' \
+            --user=minimarket \
+            --database=minimarket \
+            --ssl \
+            < /opt/minimarket/database/schema.sql
 
-        unset DB_SECRET ADMIN_SECRET
+          unset DB_SECRET ADMIN_SECRET
           cat > /etc/nginx/conf.d/minimarket.conf <<'EOC'
           server {
             listen 80;
