@@ -157,6 +157,15 @@ Resources:
           npm install --omit=dev --no-audit --no-fund
           DB_SECRET=$(aws ssm get-parameter --name '${DBPasswordParameter}' --with-decryption --query Parameter.Value --output text --region '${AWS::Region}')
           ADMIN_SECRET=$(aws ssm get-parameter --name '${AdminTokenParameter}' --with-decryption --query Parameter.Value --output text --region '${AWS::Region}')
+          if [[ ! "$DB_SECRET" =~ ^[0-9a-fA-F]{32}$ ]]; then
+            echo "Error: formato de contraseña DB no valido"
+            exit 1
+          fi
+
+          if [[ ! "$ADMIN_SECRET" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "Error: formato de token administrativo no valido"
+            exit 1
+          fi
           umask 077
           cat > /etc/minimarket.env <<EOC
           PORT=3000
@@ -168,7 +177,6 @@ Resources:
           ADMIN_TOKEN=$ADMIN_SECRET
           EOC
           chmod 600 /etc/minimarket.env
-          unset DB_SECRET ADMIN_SECRET
           cat > /etc/systemd/system/minimarket.service <<'EOC'
           [Unit]
           Description=Minimarket Cloud
@@ -187,11 +195,15 @@ Resources:
           [Install]
           WantedBy=multi-user.target
           EOC
-          # Usar archivo de opciones MySQL temporal para no mostrar password en argv.
-          ( . /etc/minimarket.env; printf '[client]\nhost=%s\nuser=%s\npassword=%s\nssl\n' "$DB_HOST" "$DB_USER" "$DB_PASSWORD" > /root/.minimarket-my.cnf )
-          chmod 600 /root/.minimarket-my.cnf
-          mariadb --defaults-extra-file=/root/.minimarket-my.cnf < /opt/minimarket/database/schema.sql
-          rm -f /root/.minimarket-my.cnf
+          # Importar esquema MySQL sin ejecutar el archivo de secretos como Bash
+          MYSQL_PWD="$DB_SECRET" mariadb \
+        --host='${Database.Endpoint.Address}' \
+        --user=minimarket \
+        --database=minimarket \
+        --ssl \
+        < /opt/minimarket/database/schema.sql
+
+        unset DB_SECRET ADMIN_SECRET
           cat > /etc/nginx/conf.d/minimarket.conf <<'EOC'
           server {
             listen 80;
@@ -206,6 +218,17 @@ Resources:
             }
           }
           EOC
+          # Descargar certificados oficiales de Amazon RDS
+          curl -fL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /etc/ssl/certs/rds-global-bundle.pem
+
+          # Configurar Node.js para confiar en Amazon RDS
+          mkdir -p /etc/systemd/system/minimarket.service.d
+
+          cat > /etc/systemd/system/minimarket.service.d/rds-ssl.conf <<'EOC'
+          [Service]
+          Environment="NODE_EXTRA_CA_CERTS=/etc/ssl/certs/rds-global-bundle.pem"
+          EOC
+          
           systemctl daemon-reload
           systemctl enable --now minimarket nginx
           cat > /opt/minimarket/cloudwatch-agent-runtime.json <<'EOC'
