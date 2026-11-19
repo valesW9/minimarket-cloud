@@ -121,7 +121,7 @@ Resources:
       PubliclyAccessible: false
       DBName: minimarket
       MasterUsername: minimarket
-      MasterUserPassword: !Sub '{{resolve:ssm-secure:${DBPasswordParameter}:1}}'
+      MasterUserPassword: !Sub '{{resolve:ssm-secure:${DBPasswordParameter}:2}}'
       VPCSecurityGroups: [!Ref DbSecurityGroup]
       DBSubnetGroupName: !Ref SubnetGroupDB
       DeletionProtection: false
